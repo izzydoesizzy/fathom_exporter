@@ -52,7 +52,7 @@ export FATHOM_API_KEY="paste_your_real_key_here"
 Optional settings:
 
 ```bash
-export FATHOM_API_BASE_URL="https://api.fathom.video"
+export FATHOM_API_BASE_URL="https://api.fathom.ai"
 export FATHOM_OUTPUT_DIR="exports"
 export FATHOM_PAGE_SIZE="50"
 ```
@@ -113,12 +113,44 @@ This repo includes tests for key parts:
 - date formatting
 - filename safety
 - export file generation
+- optional live DNS/HTTPS connectivity diagnostics
 
-Run them with:
+### Quick test run (quiet)
 
 ```bash
 python3 -m pytest -q
 ```
+
+### Verbose test run (recommended for understanding behavior)
+
+```bash
+python3 -m pytest -vv -s
+```
+
+What you will see in verbose mode:
+
+- `[TEST] ...` lines that explain what each unit test is verifying
+- assertion messages that explain why a failure happened
+- exporter log lines (`[INFO] ...`) when file export tests run
+
+### Optional live connectivity diagnostics
+
+By default, live network tests are skipped because they depend on your internet/proxy/DNS setup.
+
+To enable them:
+
+```bash
+export FATHOM_RUN_NETWORK_TESTS="1"
+python3 -m pytest -vv -s tests/test_connectivity_diagnostics.py
+```
+
+What the connectivity test checks:
+
+- resolves DNS for the configured base URL host
+- performs an HTTPS GET request to the base URL
+- prints diagnostic details (host, resolved IP, HTTP status)
+
+It uses `FATHOM_API_BASE_URL` if set, otherwise defaults to `https://api.fathom.ai`.
 
 If `pytest` is not installed, use:
 

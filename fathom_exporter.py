@@ -275,7 +275,7 @@ def main() -> int:
     print("[INFO] Starting Fathom transcript export...")
     try:
         api_key = load_env("FATHOM_API_KEY", required=True)
-        base_url = load_env("FATHOM_API_BASE_URL", default="https://api.fathom.video")
+        base_url = load_env("FATHOM_API_BASE_URL", default="https://api.fathom.ai")
         output_dir = Path(load_env("FATHOM_OUTPUT_DIR", default="exports"))
         page_size_raw = load_env("FATHOM_PAGE_SIZE", default="50")
         page_size = int(page_size_raw)
