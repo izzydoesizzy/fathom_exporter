@@ -56,6 +56,8 @@ export FATHOM_API_BASE_URL="https://api.fathom.ai"
 export FATHOM_OUTPUT_DIR="exports"
 export FATHOM_MEETINGS_DOMAINS_TYPE="all"
 export FATHOM_MEETINGS_PAGE_LIMIT=""  # optional override for debugging
+export FATHOM_RATE_LIMIT_CALLS="55"     # stay below Fathom's 60/60s hard limit
+export FATHOM_MAX_RETRIES="5"           # retries when 429/network hiccups happen
 ```
 
 ### 3) Run the exporter
@@ -68,6 +70,8 @@ You should see verbose logs like:
 
 - How many meeting pages were fetched from the API
 - Which recording ID transcript is being called
+- When the exporter intentionally pauses to avoid API rate limits
+- When a 429 happens and a retry/backoff is being applied
 - Which files are written
 
 ---
