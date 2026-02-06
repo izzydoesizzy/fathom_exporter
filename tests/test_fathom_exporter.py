@@ -9,6 +9,7 @@ from fathom_exporter import (
     parse_source_json,
     safe_filename,
     export_records,
+    export_records_streaming,
 )
 
 
@@ -101,3 +102,35 @@ def test_fetch_all_meetings_follows_next_cursor():
     assert [item["recording_id"] for item in items] == [1, 2]
     assert "cursor=abc" in stub.urls[1]
 
+
+def test_export_records_streaming_writes_files_incrementally(tmp_path: Path):
+    class StreamingStubClient:
+        def fetch_transcript(self, recording_id: str) -> str:
+            return f"transcript for {recording_id}"
+
+    items = [
+        {
+            "recording_id": "id-1",
+            "meeting_title": "First Meeting",
+            "recording_start_time": "2024-12-01T10:00:00Z",
+            "calendar_invitees": [{"name": "Alice"}],
+        },
+        {
+            "recording_id": "id-2",
+            "meeting_title": "Second Meeting",
+            "recording_start_time": "2024-12-02T10:00:00Z",
+            "calendar_invitees": [{"name": "Bob"}],
+        },
+    ]
+
+    count = export_records_streaming(items, client=StreamingStubClient(), output_dir=tmp_path)
+
+    assert count == 2
+    markdown_files = sorted(tmp_path.glob("*.md"))
+    assert len(markdown_files) == 2
+    assert "transcript for id-1" in markdown_files[0].read_text(encoding="utf-8")
+    assert "transcript for id-2" in markdown_files[1].read_text(encoding="utf-8")
+
+    csv_path = tmp_path / "index.csv"
+    rows = list(csv.DictReader(csv_path.open("r", encoding="utf-8")))
+    assert len(rows) == 2
