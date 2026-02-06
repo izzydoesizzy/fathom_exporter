@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -42,10 +43,22 @@ class FathomExporterError(Exception):
 class FathomClient:
     """Minimal API client for transcript fetches from Fathom External API."""
 
-    def __init__(self, api_key: str, base_url: str, timeout: int = 30):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout: int = 30,
+        max_calls_per_window: int = 55,
+        window_seconds: int = 60,
+        max_retries: int = 5,
+    ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_calls_per_window = max_calls_per_window
+        self.window_seconds = window_seconds
+        self.max_retries = max_retries
+        self._request_timestamps: deque[float] = deque()
 
     def fetch_transcript(self, recording_id: str) -> str:
         endpoint = f"external/v1/recordings/{recording_id}/transcript"
@@ -113,26 +126,82 @@ class FathomClient:
             "Accept": "application/json",
             "User-Agent": "fathom-exporter/1.0",
         }
-        request = Request(url, headers=headers, method="GET")
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
-        except HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise FathomExporterError(
-                f"API request failed with HTTP {exc.code} for {error_context}. Response body: {details}"
-            ) from exc
-        except URLError as exc:
-            raise FathomExporterError(
-                f"Network error while calling {error_context}: {exc}"
-            ) from exc
+        for attempt in range(1, self.max_retries + 1):
+            self._wait_for_rate_limit_slot(error_context=error_context)
 
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise FathomExporterError(
-                f"API returned invalid JSON for {error_context}."
-            ) from exc
+            request = Request(url, headers=headers, method="GET")
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    body = response.read().decode("utf-8")
+                self._mark_request_complete()
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as exc:
+                    raise FathomExporterError(
+                        f"API returned invalid JSON for {error_context}."
+                    ) from exc
+            except HTTPError as exc:
+                details = exc.read().decode("utf-8", errors="replace")
+                self._mark_request_complete()
+                if exc.code == 429 and attempt < self.max_retries:
+                    retry_after = _parse_retry_after_seconds(details) or min(5 * attempt, 30)
+                    print(
+                        "[WARN] The API reported a rate-limit (HTTP 429). "
+                        f"We'll pause for {retry_after:.1f}s, then retry {error_context} "
+                        f"(attempt {attempt + 1}/{self.max_retries})."
+                    )
+                    time.sleep(retry_after)
+                    continue
+                raise FathomExporterError(
+                    f"API request failed with HTTP {exc.code} for {error_context}. Response body: {details}"
+                ) from exc
+            except URLError as exc:
+                if attempt < self.max_retries:
+                    backoff = min(2 * attempt, 10)
+                    print(
+                        f"[WARN] Network hiccup while calling {error_context}: {exc}. "
+                        f"Retrying in {backoff}s (attempt {attempt + 1}/{self.max_retries})."
+                    )
+                    time.sleep(backoff)
+                    continue
+                raise FathomExporterError(
+                    f"Network error while calling {error_context}: {exc}"
+                ) from exc
+
+        raise FathomExporterError(f"Exhausted retries while calling {error_context}.")
+
+    def _wait_for_rate_limit_slot(self, error_context: str) -> None:
+        """Client-side pacing so we stay safely below the API's published limit.
+
+        In plain English: we keep a rolling list of when recent requests happened.
+        If we have already used up our budget for the current time window,
+        we sleep until one of those older requests ages out.
+        """
+
+        now = time.monotonic()
+        window_start = now - self.window_seconds
+        while self._request_timestamps and self._request_timestamps[0] <= window_start:
+            self._request_timestamps.popleft()
+
+        if len(self._request_timestamps) >= self.max_calls_per_window:
+            oldest = self._request_timestamps[0]
+            wait_for = max(0.05, self.window_seconds - (now - oldest) + 0.05)
+            print(
+                "[INFO] ⏳ Throttling requests so we do not exceed the API limit. "
+                f"Waiting {wait_for:.2f}s before calling {error_context}."
+            )
+            time.sleep(wait_for)
+
+    def _mark_request_complete(self) -> None:
+        self._request_timestamps.append(time.monotonic())
+
+
+def _parse_retry_after_seconds(response_body: str) -> Optional[float]:
+    match = re.search(r"(\d+)\s*second", response_body, re.IGNORECASE)
+    if not match:
+        return None
+    seconds = int(match.group(1))
+    return float(max(1, seconds))
 
 
 
@@ -217,6 +286,8 @@ def extract_participants(item: Dict[str, Any]) -> List[str]:
 
 def build_records_from_source(items: List[Dict[str, Any]], client: FathomClient) -> List[TranscriptRecord]:
     records: List[TranscriptRecord] = []
+    total = len(items)
+    print(f"[INFO] 🎬 Beginning transcript export for {total} meeting(s).")
     for index, item in enumerate(items, start=1):
         recording_id = item.get("recording_id")
         if not recording_id:
@@ -237,6 +308,7 @@ def build_records_from_source(items: List[Dict[str, Any]], client: FathomClient)
         )
         participants = extract_participants(item)
 
+        print(f"[INFO] 📄 [{index}/{total}] Preparing transcript request for recording_id={recording_id}")
         transcript = client.fetch_transcript(str(recording_id))
 
         records.append(
@@ -248,7 +320,7 @@ def build_records_from_source(items: List[Dict[str, Any]], client: FathomClient)
                 participants=participants,
             )
         )
-        time.sleep(0.05)
+        print(f"[INFO] ✅ [{index}/{total}] Transcript captured for '{str(title).strip()}'")
 
     return records
 
@@ -323,7 +395,7 @@ def load_env(name: str, required: bool = False, default: Optional[str] = None) -
 
 
 def main() -> int:
-    print("[INFO] Starting Fathom transcript export...")
+    print("[INFO] 🚀 Starting Fathom transcript export...")
     try:
         api_key = load_env("FATHOM_API_KEY", required=True)
         base_url = load_env("FATHOM_API_BASE_URL", default="https://api.fathom.ai")
@@ -331,14 +403,28 @@ def main() -> int:
         meetings_scope = load_env("FATHOM_MEETINGS_DOMAINS_TYPE", default="all")
         page_limit_raw = load_env("FATHOM_MEETINGS_PAGE_LIMIT", default="")
         page_limit = int(page_limit_raw) if page_limit_raw.strip() else None
+        max_calls_raw = load_env("FATHOM_RATE_LIMIT_CALLS", default="55")
+        max_calls_per_window = int(max_calls_raw)
+        max_retries_raw = load_env("FATHOM_MAX_RETRIES", default="5")
+        max_retries = int(max_retries_raw)
 
         print(f"[INFO] Base URL: {base_url}")
         print(f"[INFO] Output directory: {output_dir.resolve()}")
         print(f"[INFO] Meetings filter (calendar_invitees_domains_type): {meetings_scope}")
+        print(
+            "[INFO] Request pacing: "
+            f"up to {max_calls_per_window} call(s) every 60 second(s), "
+            f"with up to {max_retries} retries per request."
+        )
         if page_limit:
             print(f"[INFO] Meetings page limit override: {page_limit}")
 
-        client = FathomClient(api_key=api_key, base_url=base_url)
+        client = FathomClient(
+            api_key=api_key,
+            base_url=base_url,
+            max_calls_per_window=max_calls_per_window,
+            max_retries=max_retries,
+        )
         items = client.fetch_all_meetings(
             calendar_invitees_domains_type=meetings_scope,
             limit=page_limit,

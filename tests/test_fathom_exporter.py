@@ -9,6 +9,7 @@ from fathom_exporter import (
     parse_source_json,
     safe_filename,
     export_records,
+    _parse_retry_after_seconds,
 )
 
 
@@ -101,3 +102,12 @@ def test_fetch_all_meetings_follows_next_cursor():
     assert [item["recording_id"] for item in items] == [1, 2]
     assert "cursor=abc" in stub.urls[1]
 
+
+
+def test_parse_retry_after_seconds_handles_plain_english_limit_message():
+    body = "Currently, you are able to make a maximum of 60 calls to the API in a 60 second window."
+    assert _parse_retry_after_seconds(body) == 60.0
+
+
+def test_parse_retry_after_seconds_returns_none_without_seconds_phrase():
+    assert _parse_retry_after_seconds("no guidance in this body") is None
