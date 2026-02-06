@@ -12,6 +12,18 @@ from fathom_exporter import (
 )
 
 
+class StubClient:
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.urls = []
+
+    def _request_json(self, url, error_context):
+        self.urls.append(url)
+        if not self.pages:
+            raise AssertionError("No more stub pages available")
+        return self.pages.pop(0)
+
+
 def test_extract_transcript_text_accepts_common_shapes():
     assert extract_transcript_text({"transcript": "Hello world"}) == "Hello world"
     assert extract_transcript_text({"data": {"transcriptText": "Nested"}}) == "Nested"
@@ -71,3 +83,21 @@ def test_export_records_writes_markdown_and_index(tmp_path: Path):
     rows = list(csv.DictReader(csv_path.open("r", encoding="utf-8")))
     assert rows[0]["id"] == "abc123"
     assert rows[0]["participants"] == "Alice, Bob"
+
+
+def test_fetch_all_meetings_follows_next_cursor():
+    from fathom_exporter import FathomClient
+
+    pages = [
+        {"items": [{"recording_id": 1}], "next_cursor": "abc"},
+        {"items": [{"recording_id": 2}], "next_cursor": None},
+    ]
+    client = FathomClient(api_key="test", base_url="https://api.fathom.ai")
+    stub = StubClient(pages)
+    client._request_json = stub._request_json  # type: ignore[method-assign]
+
+    items = client.fetch_all_meetings(calendar_invitees_domains_type="all")
+
+    assert [item["recording_id"] for item in items] == [1, 2]
+    assert "cursor=abc" in stub.urls[1]
+

@@ -6,7 +6,7 @@ This project is designed for people with very little coding experience.
 
 ## What this does
 
-- Reads your `api-response.json` file for recording metadata
+- Retrieves every meeting from the Fathom meetings API (auto-paginates until `next_cursor` is empty)
 - Fetches each transcript from the Fathom External API (`/external/v1/recordings/{id}/transcript`)
 - Exports each transcript into a **Markdown (`.md`) file**
 - Includes the **title** and **date** in each exported file
@@ -54,7 +54,8 @@ Optional settings:
 ```bash
 export FATHOM_API_BASE_URL="https://api.fathom.ai"
 export FATHOM_OUTPUT_DIR="exports"
-export FATHOM_SOURCE_JSON="api-response.json"
+export FATHOM_MEETINGS_DOMAINS_TYPE="all"
+export FATHOM_MEETINGS_PAGE_LIMIT=""  # optional override for debugging
 ```
 
 ### 3) Run the exporter
@@ -65,7 +66,7 @@ python3 fathom_exporter.py
 
 You should see verbose logs like:
 
-- How many records were loaded from `api-response.json`
+- How many meeting pages were fetched from the API
 - Which recording ID transcript is being called
 - Which files are written
 
@@ -96,9 +97,11 @@ You forgot to set your API key in this terminal session.
 
 Fathom API endpoints can vary by account/version.
 
-Check the structure of `api-response.json` and verify it includes an `items` list with `recording_id`.
+The script first calls:
 
-The script then calls:
+- `GET /external/v1/meetings?calendar_invitees_domains_type=all` (and follows `next_cursor`)
+
+Then for each `recording_id` it calls:
 
 - `GET /external/v1/recordings/{recording_id}/transcript`
 - Header: `X-Api-Key: <your key>`
@@ -166,7 +169,8 @@ python3 -m pip install pytest
 .
 ├── fathom_exporter.py
 ├── tests/
-│   └── test_fathom_exporter.py
+│   ├── test_fathom_exporter.py
+│   └── test_connectivity_diagnostics.py
 └── README.md
 ```
 

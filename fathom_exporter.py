@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -49,33 +50,12 @@ class FathomClient:
     def fetch_transcript(self, recording_id: str) -> str:
         endpoint = f"external/v1/recordings/{recording_id}/transcript"
         url = f"{self.base_url}/{endpoint}"
-        headers = {
-            "X-Api-Key": self.api_key,
-            "Accept": "application/json",
-            "User-Agent": "fathom-exporter/1.0",
-        }
 
         print(f"[INFO] Requesting transcript for recording_id={recording_id}: {url}")
-        request = Request(url, headers=headers, method="GET")
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
-        except HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise FathomExporterError(
-                f"API request failed with HTTP {exc.code} for recording {recording_id}. Response body: {details}"
-            ) from exc
-        except URLError as exc:
-            raise FathomExporterError(
-                f"Network error while calling transcript endpoint for recording {recording_id}: {exc}"
-            ) from exc
-
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise FathomExporterError(
-                f"Transcript endpoint returned invalid JSON for recording {recording_id}."
-            ) from exc
+        payload = self._request_json(
+            url=url,
+            error_context=f"transcript endpoint for recording {recording_id}",
+        )
 
         transcript = extract_transcript_text(payload)
         if not transcript:
@@ -84,6 +64,75 @@ class FathomClient:
             )
 
         return transcript
+
+    def fetch_all_meetings(
+        self,
+        calendar_invitees_domains_type: str = "all",
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        all_items: List[Dict[str, Any]] = []
+        next_cursor: Optional[str] = None
+        page = 0
+
+        while True:
+            page += 1
+            params: Dict[str, Any] = {
+                "calendar_invitees_domains_type": calendar_invitees_domains_type,
+            }
+            if limit:
+                params["limit"] = limit
+            if next_cursor:
+                params["cursor"] = next_cursor
+
+            query = urlencode(params)
+            url = f"{self.base_url}/external/v1/meetings?{query}"
+            print(f"[INFO] Requesting meetings page {page}: {url}")
+
+            payload = self._request_json(url=url, error_context=f"meetings endpoint page {page}")
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                raise FathomExporterError(
+                    f"Meetings endpoint page {page} did not return an 'items' list."
+                )
+
+            page_items = [item for item in items if isinstance(item, dict)]
+            print(f"[INFO] Meetings page {page}: received {len(page_items)} items")
+            all_items.extend(page_items)
+
+            next_cursor_value = payload.get("next_cursor") if isinstance(payload, dict) else None
+            next_cursor = str(next_cursor_value).strip() if next_cursor_value else None
+            if not next_cursor:
+                break
+
+        print(f"[INFO] Retrieved {len(all_items)} total meetings across {page} page(s)")
+        return all_items
+
+    def _request_json(self, url: str, error_context: str) -> Any:
+        headers = {
+            "X-Api-Key": self.api_key,
+            "Accept": "application/json",
+            "User-Agent": "fathom-exporter/1.0",
+        }
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            raise FathomExporterError(
+                f"API request failed with HTTP {exc.code} for {error_context}. Response body: {details}"
+            ) from exc
+        except URLError as exc:
+            raise FathomExporterError(
+                f"Network error while calling {error_context}: {exc}"
+            ) from exc
+
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise FathomExporterError(
+                f"API returned invalid JSON for {error_context}."
+            ) from exc
 
 
 
@@ -279,16 +328,21 @@ def main() -> int:
         api_key = load_env("FATHOM_API_KEY", required=True)
         base_url = load_env("FATHOM_API_BASE_URL", default="https://api.fathom.ai")
         output_dir = Path(load_env("FATHOM_OUTPUT_DIR", default="exports"))
-        source_json_path = Path(load_env("FATHOM_SOURCE_JSON", default="api-response.json"))
+        meetings_scope = load_env("FATHOM_MEETINGS_DOMAINS_TYPE", default="all")
+        page_limit_raw = load_env("FATHOM_MEETINGS_PAGE_LIMIT", default="")
+        page_limit = int(page_limit_raw) if page_limit_raw.strip() else None
 
         print(f"[INFO] Base URL: {base_url}")
         print(f"[INFO] Output directory: {output_dir.resolve()}")
-        print(f"[INFO] Source JSON: {source_json_path.resolve()}")
-
-        items = parse_source_json(source_json_path)
-        print(f"[INFO] Loaded {len(items)} meeting records from source JSON")
+        print(f"[INFO] Meetings filter (calendar_invitees_domains_type): {meetings_scope}")
+        if page_limit:
+            print(f"[INFO] Meetings page limit override: {page_limit}")
 
         client = FathomClient(api_key=api_key, base_url=base_url)
+        items = client.fetch_all_meetings(
+            calendar_invitees_domains_type=meetings_scope,
+            limit=page_limit,
+        )
         records = build_records_from_source(items, client=client)
 
         if not records:
