@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Fathom transcript exporter.
 
-This script fetches transcript-like records from the Fathom API and exports each
-record to a local Markdown file with title/date metadata.
-
-It intentionally uses only Python's standard library so it can run on a Mac
-without extra CLI tools or third-party package installs.
+This script reads a local API response JSON file to discover recording metadata,
+then fetches each transcript via the Fathom External API and exports results to
+local Markdown files + an index CSV.
 """
 
 from __future__ import annotations
@@ -16,12 +14,12 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -33,6 +31,7 @@ class TranscriptRecord:
     title: str
     date: str
     transcript: str
+    participants: List[str] = field(default_factory=list)
 
 
 class FathomExporterError(Exception):
@@ -40,166 +39,169 @@ class FathomExporterError(Exception):
 
 
 class FathomClient:
-    """Minimal API client for listing transcript-like objects from Fathom."""
+    """Minimal API client for transcript fetches from Fathom External API."""
 
-    def __init__(self, api_key: str, base_url: str, page_size: int = 50, timeout: int = 30):
+    def __init__(self, api_key: str, base_url: str, timeout: int = 30):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.page_size = page_size
         self.timeout = timeout
 
-    def _build_request(self, endpoint: str, query: Optional[Dict[str, Any]] = None) -> Request:
-        query_string = f"?{urlencode(query)}" if query else ""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}" + query_string
+    def fetch_transcript(self, recording_id: str) -> str:
+        endpoint = f"external/v1/recordings/{recording_id}/transcript"
+        url = f"{self.base_url}/{endpoint}"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "X-Api-Key": self.api_key,
             "Accept": "application/json",
             "User-Agent": "fathom-exporter/1.0",
         }
-        print(f"[INFO] Requesting: {url}")
-        return Request(url, headers=headers, method="GET")
 
-    def _get_json(self, endpoint: str, query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        request = self._build_request(endpoint, query=query)
+        print(f"[INFO] Requesting transcript for recording_id={recording_id}: {url}")
+        request = Request(url, headers=headers, method="GET")
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 body = response.read().decode("utf-8")
-                print(f"[INFO] Response status: {response.status}, bytes: {len(body)}")
-                return json.loads(body)
         except HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace")
             raise FathomExporterError(
-                f"API request failed with HTTP {exc.code} for endpoint '{endpoint}'.\n"
-                f"Response body: {details}"
+                f"API request failed with HTTP {exc.code} for recording {recording_id}. Response body: {details}"
             ) from exc
         except URLError as exc:
-            raise FathomExporterError(f"Network error while calling endpoint '{endpoint}': {exc}") from exc
-        except json.JSONDecodeError as exc:
             raise FathomExporterError(
-                f"API returned invalid JSON for endpoint '{endpoint}'."
+                f"Network error while calling transcript endpoint for recording {recording_id}: {exc}"
             ) from exc
 
-    def fetch_all_records(self) -> List[TranscriptRecord]:
-        """Try common transcript endpoints and normalize returned records."""
-        candidate_endpoints = [
-            "v1/transcripts",
-            "v1/calls",
-            "v1/meetings",
-        ]
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise FathomExporterError(
+                f"Transcript endpoint returned invalid JSON for recording {recording_id}."
+            ) from exc
 
-        for endpoint in candidate_endpoints:
-            print(f"[INFO] Trying endpoint: {endpoint}")
-            records = self._fetch_paginated(endpoint)
-            if records:
-                print(f"[INFO] Successfully found {len(records)} transcript records at '{endpoint}'.")
-                return records
-            print(f"[INFO] Endpoint '{endpoint}' returned no transcript records.")
+        transcript = extract_transcript_text(payload)
+        if not transcript:
+            raise FathomExporterError(
+                f"Transcript response for recording {recording_id} did not include transcript text."
+            )
 
+        return transcript
+
+
+
+def extract_transcript_text(payload: Any) -> str:
+    """Extract transcript text from common response shapes."""
+    if isinstance(payload, str):
+        return payload.strip()
+
+    if isinstance(payload, list):
+        lines = [str(part).strip() for part in payload if str(part).strip()]
+        return "\n".join(lines).strip()
+
+    if isinstance(payload, dict):
+        for key in (
+            "transcript",
+            "transcript_text",
+            "transcriptText",
+            "text",
+            "content",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, list):
+                joined = "\n".join(str(part).strip() for part in value if str(part).strip()).strip()
+                if joined:
+                    return joined
+
+        # Sometimes nested under `data`.
+        data = payload.get("data")
+        if data is not None:
+            return extract_transcript_text(data)
+
+    return ""
+
+
+def parse_source_json(source_json_path: Path) -> List[Dict[str, Any]]:
+    try:
+        payload = json.loads(source_json_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FathomExporterError(f"Source JSON file not found: {source_json_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise FathomExporterError(f"Source JSON file is not valid JSON: {source_json_path}") from exc
+
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
         raise FathomExporterError(
-            "Could not find transcript records using built-in endpoints. "
-            "Please update the endpoint list in `FathomClient.fetch_all_records` to match your account/API version."
+            f"Expected an 'items' list in source JSON file: {source_json_path}"
         )
 
-    def _fetch_paginated(self, endpoint: str) -> List[TranscriptRecord]:
-        records: List[TranscriptRecord] = []
-        page = 1
-        cursor: Optional[str] = None
+    return [item for item in items if isinstance(item, dict)]
 
-        while True:
-            params: Dict[str, Any] = {"limit": self.page_size, "page": page}
-            if cursor:
-                params["cursor"] = cursor
 
-            payload = self._get_json(endpoint, query=params)
-            raw_items = self._extract_item_list(payload)
-            normalized = [normalize_record(item) for item in raw_items]
-            normalized = [item for item in normalized if item is not None]
+def extract_participants(item: Dict[str, Any]) -> List[str]:
+    participants: List[str] = []
+    invitees = item.get("calendar_invitees")
+    if isinstance(invitees, list):
+        for person in invitees:
+            if not isinstance(person, dict):
+                continue
+            name = (person.get("name") or "").strip()
+            email = (person.get("email") or "").strip()
+            if name:
+                participants.append(name)
+            elif email:
+                participants.append(email)
 
-            print(
-                f"[INFO] Parsed page {page} from '{endpoint}' -> "
-                f"{len(raw_items)} raw items, {len(normalized)} transcript-like items"
+    if not participants and isinstance(item.get("recorded_by"), dict):
+        recorder = item["recorded_by"]
+        fallback_name = (recorder.get("name") or recorder.get("email") or "").strip()
+        if fallback_name:
+            participants.append(fallback_name)
+
+    deduped: List[str] = []
+    seen = set()
+    for participant in participants:
+        if participant not in seen:
+            seen.add(participant)
+            deduped.append(participant)
+    return deduped
+
+
+def build_records_from_source(items: List[Dict[str, Any]], client: FathomClient) -> List[TranscriptRecord]:
+    records: List[TranscriptRecord] = []
+    for index, item in enumerate(items, start=1):
+        recording_id = item.get("recording_id")
+        if not recording_id:
+            print(f"[WARN] Skipping item #{index}: missing recording_id")
+            continue
+
+        title = (
+            item.get("meeting_title")
+            or item.get("title")
+            or item.get("name")
+            or f"Untitled Meeting {recording_id}"
+        )
+        raw_date = (
+            item.get("recording_start_time")
+            or item.get("created_at")
+            or item.get("scheduled_start_time")
+            or ""
+        )
+        participants = extract_participants(item)
+
+        transcript = client.fetch_transcript(str(recording_id))
+
+        records.append(
+            TranscriptRecord(
+                record_id=str(recording_id),
+                title=str(title).strip(),
+                date=normalize_date(str(raw_date)),
+                transcript=transcript,
+                participants=participants,
             )
-            records.extend(normalized)
+        )
+        time.sleep(0.05)
 
-            cursor = payload.get("next_cursor") or payload.get("nextCursor")
-            has_more = bool(payload.get("has_more") or payload.get("hasMore") or cursor)
-
-            if not has_more:
-                break
-
-            page += 1
-            time.sleep(0.1)
-
-        return records
-
-    @staticmethod
-    def _extract_item_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-
-        for key in ("items", "data", "results", "meetings", "calls", "transcripts"):
-            maybe_items = payload.get(key)
-            if isinstance(maybe_items, list):
-                return [item for item in maybe_items if isinstance(item, dict)]
-
-        if isinstance(payload.get("data"), dict):
-            data_obj = payload["data"]
-            for key in ("items", "results", "meetings", "calls", "transcripts"):
-                maybe_items = data_obj.get(key)
-                if isinstance(maybe_items, list):
-                    return [item for item in maybe_items if isinstance(item, dict)]
-
-        return []
-
-
-def normalize_record(item: Dict[str, Any]) -> Optional[TranscriptRecord]:
-    """Convert many possible API field names into one normalized structure."""
-    record_id = (
-        item.get("id")
-        or item.get("meeting_id")
-        or item.get("meetingId")
-        or item.get("call_id")
-        or item.get("callId")
-    )
-
-    transcript = (
-        item.get("transcript")
-        or item.get("transcript_text")
-        or item.get("transcriptText")
-        or item.get("content")
-        or ""
-    )
-
-    if isinstance(transcript, list):
-        transcript = "\n".join(str(part) for part in transcript)
-
-    if not record_id or not str(transcript).strip():
-        return None
-
-    title = (
-        item.get("title")
-        or item.get("name")
-        or item.get("meeting_title")
-        or item.get("meetingTitle")
-        or f"Untitled Meeting {record_id}"
-    )
-
-    raw_date = (
-        item.get("date")
-        or item.get("created_at")
-        or item.get("createdAt")
-        or item.get("started_at")
-        or item.get("startedAt")
-        or ""
-    )
-
-    formatted_date = normalize_date(str(raw_date))
-    return TranscriptRecord(
-        record_id=str(record_id),
-        title=str(title).strip(),
-        date=formatted_date,
-        transcript=str(transcript).strip(),
-    )
+    return records
 
 
 def normalize_date(raw: str) -> str:
@@ -207,14 +209,11 @@ def normalize_date(raw: str) -> str:
         return "unknown-date"
 
     normalized = raw.replace("Z", "+00:00")
-    for parser in (datetime.fromisoformat,):
-        try:
-            dt = parser(normalized)
-            return dt.strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-
-    return raw[:10]
+    try:
+        dt = datetime.fromisoformat(normalized)
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return raw[:10]
 
 
 def safe_filename(value: str) -> str:
@@ -230,17 +229,19 @@ def export_records(records: Iterable[TranscriptRecord], output_dir: Path) -> int
 
     exported = 0
     with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=["id", "date", "title", "file"])
+        writer = csv.DictWriter(csv_file, fieldnames=["id", "date", "title", "participants", "file"])
         writer.writeheader()
 
         for record in records:
             filename = f"{record.date}_{safe_filename(record.title)}_{safe_filename(record.record_id)}.md"
             file_path = output_dir / filename
+            participant_line = ", ".join(record.participants) if record.participants else "Unknown"
 
             body = (
                 f"# {record.title}\n\n"
                 f"- **Date:** {record.date}\n"
-                f"- **ID:** {record.record_id}\n\n"
+                f"- **ID:** {record.record_id}\n"
+                f"- **Participants:** {participant_line}\n\n"
                 f"## Transcript\n\n"
                 f"{record.transcript}\n"
             )
@@ -251,6 +252,7 @@ def export_records(records: Iterable[TranscriptRecord], output_dir: Path) -> int
                     "id": record.record_id,
                     "date": record.date,
                     "title": record.title,
+                    "participants": participant_line,
                     "file": filename,
                 }
             )
@@ -277,15 +279,17 @@ def main() -> int:
         api_key = load_env("FATHOM_API_KEY", required=True)
         base_url = load_env("FATHOM_API_BASE_URL", default="https://api.fathom.ai")
         output_dir = Path(load_env("FATHOM_OUTPUT_DIR", default="exports"))
-        page_size_raw = load_env("FATHOM_PAGE_SIZE", default="50")
-        page_size = int(page_size_raw)
+        source_json_path = Path(load_env("FATHOM_SOURCE_JSON", default="api-response.json"))
 
         print(f"[INFO] Base URL: {base_url}")
         print(f"[INFO] Output directory: {output_dir.resolve()}")
-        print(f"[INFO] Page size: {page_size}")
+        print(f"[INFO] Source JSON: {source_json_path.resolve()}")
 
-        client = FathomClient(api_key=api_key, base_url=base_url, page_size=page_size)
-        records = client.fetch_all_records()
+        items = parse_source_json(source_json_path)
+        print(f"[INFO] Loaded {len(items)} meeting records from source JSON")
+
+        client = FathomClient(api_key=api_key, base_url=base_url)
+        records = build_records_from_source(items, client=client)
 
         if not records:
             print("[WARN] No transcript records were found.")
@@ -295,9 +299,6 @@ def main() -> int:
         print(f"[INFO] Done. Exported {count} transcript files.")
         return 0
 
-    except ValueError as exc:
-        print(f"[ERROR] Invalid numeric config: {exc}")
-        return 1
     except FathomExporterError as exc:
         print(f"[ERROR] {exc}")
         return 1
