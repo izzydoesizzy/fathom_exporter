@@ -1,63 +1,73 @@
 import csv
 from pathlib import Path
 
-from fathom_exporter import TranscriptRecord, export_records, normalize_date, normalize_record, safe_filename
+from fathom_exporter import (
+    TranscriptRecord,
+    extract_participants,
+    extract_transcript_text,
+    normalize_date,
+    parse_source_json,
+    safe_filename,
+    export_records,
+)
 
 
-def test_normalize_record_accepts_common_fields():
-    print("\n[TEST] normalize_record should map common API fields to TranscriptRecord")
-    row = {
-        "id": "abc123",
-        "title": "Weekly Product Sync",
-        "created_at": "2024-10-12T13:00:00Z",
-        "transcript": "Hello world",
+def test_extract_transcript_text_accepts_common_shapes():
+    assert extract_transcript_text({"transcript": "Hello world"}) == "Hello world"
+    assert extract_transcript_text({"data": {"transcriptText": "Nested"}}) == "Nested"
+    assert extract_transcript_text(["Line one", "Line two"]) == "Line one\nLine two"
+
+
+def test_extract_participants_from_calendar_invitees():
+    item = {
+        "calendar_invitees": [
+            {"name": "Alice", "email": "alice@example.com"},
+            {"name": "", "email": "bob@example.com"},
+        ]
     }
-    record = normalize_record(row)
-    assert record is not None, "Expected a TranscriptRecord when id + transcript are present"
-    assert record.record_id == "abc123", "Expected id to map to record_id"
-    assert record.title == "Weekly Product Sync", "Expected title to be preserved"
-    assert record.date == "2024-10-12", "Expected ISO datetime to normalize to YYYY-MM-DD"
-    assert record.transcript == "Hello world", "Expected transcript text to be preserved"
+    assert extract_participants(item) == ["Alice", "bob@example.com"]
 
 
-def test_normalize_record_ignores_empty_transcript():
-    print("\n[TEST] normalize_record should ignore records with empty transcript text")
-    row = {"id": "abc123", "title": "No text", "transcript": "   "}
-    assert normalize_record(row) is None, "Expected None when transcript is blank/whitespace"
+def test_parse_source_json_reads_items(tmp_path: Path):
+    path = tmp_path / "api-response.json"
+    path.write_text('{"items": [{"recording_id": 1}], "next_cursor": null}', encoding="utf-8")
+    items = parse_source_json(path)
+    assert len(items) == 1
+    assert items[0]["recording_id"] == 1
 
 
 def test_safe_filename_sanitizes_text():
-    print("\n[TEST] safe_filename should lowercase, strip, and replace punctuation with dashes")
     assert safe_filename("  My Meeting: Q4 / Plan ") == "my-meeting-q4-plan"
 
 
 def test_normalize_date_fallbacks():
-    print("\n[TEST] normalize_date should parse ISO timestamps and gracefully fallback on invalid input")
     assert normalize_date("2024-11-08T10:00:00Z") == "2024-11-08"
     assert normalize_date("not-a-date-at-all") == "not-a-date"
 
 
 def test_export_records_writes_markdown_and_index(tmp_path: Path):
-    print("\n[TEST] export_records should write one markdown file per record plus index.csv")
     records = [
         TranscriptRecord(
             record_id="abc123",
             title="Team Sync",
             date="2024-12-01",
             transcript="Line one\nLine two",
+            participants=["Alice", "Bob"],
         )
     ]
 
     count = export_records(records, output_dir=tmp_path)
 
-    assert count == 1, "Expected exactly one exported transcript"
+    assert count == 1
     files = list(tmp_path.glob("*.md"))
-    assert len(files) == 1, "Expected exactly one markdown export file"
+    assert len(files) == 1
     body = files[0].read_text(encoding="utf-8")
-    assert "# Team Sync" in body, "Expected markdown title header"
-    assert "Line two" in body, "Expected transcript content in markdown file"
+    assert "# Team Sync" in body
+    assert "- **Participants:** Alice, Bob" in body
+    assert "Line two" in body
 
     csv_path = tmp_path / "index.csv"
-    assert csv_path.exists(), "Expected index.csv to be created"
+    assert csv_path.exists()
     rows = list(csv.DictReader(csv_path.open("r", encoding="utf-8")))
-    assert rows[0]["id"] == "abc123", "Expected index.csv to include transcript record id"
+    assert rows[0]["id"] == "abc123"
+    assert rows[0]["participants"] == "Alice, Bob"

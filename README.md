@@ -6,8 +6,8 @@ This project is designed for people with very little coding experience.
 
 ## What this does
 
-- Connects to the Fathom API
-- Fetches transcript records (with pagination)
+- Reads your `api-response.json` file for recording metadata
+- Fetches each transcript from the Fathom External API (`/external/v1/recordings/{id}/transcript`)
 - Exports each transcript into a **Markdown (`.md`) file**
 - Includes the **title** and **date** in each exported file
 - Creates an `index.csv` so you can open a spreadsheet of all exports
@@ -54,7 +54,7 @@ Optional settings:
 ```bash
 export FATHOM_API_BASE_URL="https://api.fathom.ai"
 export FATHOM_OUTPUT_DIR="exports"
-export FATHOM_PAGE_SIZE="50"
+export FATHOM_SOURCE_JSON="api-response.json"
 ```
 
 ### 3) Run the exporter
@@ -65,8 +65,8 @@ python3 fathom_exporter.py
 
 You should see verbose logs like:
 
-- Which endpoint is being called
-- How many records are found per page
+- How many records were loaded from `api-response.json`
+- Which recording ID transcript is being called
 - Which files are written
 
 ---
@@ -96,12 +96,12 @@ You forgot to set your API key in this terminal session.
 
 Fathom API endpoints can vary by account/version.
 
-Open `fathom_exporter.py`, find:
+Check the structure of `api-response.json` and verify it includes an `items` list with `recording_id`.
 
-- `FathomClient.fetch_all_records`
-- `candidate_endpoints = [...]`
+The script then calls:
 
-Add or update endpoints based on your Fathom API docs.
+- `GET /external/v1/recordings/{recording_id}/transcript`
+- Header: `X-Api-Key: <your key>`
 
 ---
 
