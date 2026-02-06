@@ -53,7 +53,7 @@ Optional settings:
 
 ```bash
 export FATHOM_API_BASE_URL="https://api.fathom.ai"
-export FATHOM_OUTPUT_DIR="exports"
+export FATHOM_OUTPUT_DIR="TRANSCRIPTS"
 export FATHOM_MEETINGS_DOMAINS_TYPE="all"
 export FATHOM_MEETINGS_PAGE_LIMIT=""  # optional override for debugging
 ```
@@ -77,13 +77,17 @@ You should see verbose logs like:
 By default, exports are written into:
 
 ```text
-./exports/
+./TRANSCRIPTS/
 ```
 
 Inside that folder you will find:
 
 - One Markdown file per transcript
 - `index.csv` with `id`, `date`, `title`, and file name
+
+The exporter writes files **one-by-one while the script is running** (not only at the very end).
+That means if the script fails halfway through, all transcripts that were already exported remain
+saved in `TRANSCRIPTS` and listed in `index.csv`.
 
 ---
 

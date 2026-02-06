@@ -215,8 +215,10 @@ def extract_participants(item: Dict[str, Any]) -> List[str]:
     return deduped
 
 
-def build_records_from_source(items: List[Dict[str, Any]], client: FathomClient) -> List[TranscriptRecord]:
-    records: List[TranscriptRecord] = []
+def iter_records_from_source(
+    items: List[Dict[str, Any]],
+    client: FathomClient,
+) -> Iterable[TranscriptRecord]:
     for index, item in enumerate(items, start=1):
         recording_id = item.get("recording_id")
         if not recording_id:
@@ -239,18 +241,14 @@ def build_records_from_source(items: List[Dict[str, Any]], client: FathomClient)
 
         transcript = client.fetch_transcript(str(recording_id))
 
-        records.append(
-            TranscriptRecord(
-                record_id=str(recording_id),
-                title=str(title).strip(),
-                date=normalize_date(str(raw_date)),
-                transcript=transcript,
-                participants=participants,
-            )
+        yield TranscriptRecord(
+            record_id=str(recording_id),
+            title=str(title).strip(),
+            date=normalize_date(str(raw_date)),
+            transcript=transcript,
+            participants=participants,
         )
         time.sleep(0.05)
-
-    return records
 
 
 def normalize_date(raw: str) -> str:
@@ -312,6 +310,49 @@ def export_records(records: Iterable[TranscriptRecord], output_dir: Path) -> int
     return exported
 
 
+def export_records_streaming(items: List[Dict[str, Any]], client: FathomClient, output_dir: Path) -> int:
+    """Fetch + export transcripts one at a time so partial progress is preserved on failure."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / "index.csv"
+    exported = 0
+    total_items = len(items)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=["id", "date", "title", "participants", "file"])
+        writer.writeheader()
+
+        for record in iter_records_from_source(items, client=client):
+            filename = f"{record.date}_{safe_filename(record.title)}_{safe_filename(record.record_id)}.md"
+            file_path = output_dir / filename
+            participant_line = ", ".join(record.participants) if record.participants else "Unknown"
+            body = (
+                f"# {record.title}\n\n"
+                f"- **Date:** {record.date}\n"
+                f"- **ID:** {record.record_id}\n"
+                f"- **Participants:** {participant_line}\n\n"
+                f"## Transcript\n\n"
+                f"{record.transcript}\n"
+            )
+
+            file_path.write_text(body, encoding="utf-8")
+            writer.writerow(
+                {
+                    "id": record.record_id,
+                    "date": record.date,
+                    "title": record.title,
+                    "participants": participant_line,
+                    "file": filename,
+                }
+            )
+            csv_file.flush()
+
+            exported += 1
+            print(f"[INFO] Exported {exported}/{total_items}: {file_path}")
+
+    print(f"[INFO] Wrote CSV index: {csv_path}")
+    return exported
+
+
 def load_env(name: str, required: bool = False, default: Optional[str] = None) -> str:
     value = os.environ.get(name, default)
     if required and not value:
@@ -327,7 +368,7 @@ def main() -> int:
     try:
         api_key = load_env("FATHOM_API_KEY", required=True)
         base_url = load_env("FATHOM_API_BASE_URL", default="https://api.fathom.ai")
-        output_dir = Path(load_env("FATHOM_OUTPUT_DIR", default="exports"))
+        output_dir = Path(load_env("FATHOM_OUTPUT_DIR", default="TRANSCRIPTS"))
         meetings_scope = load_env("FATHOM_MEETINGS_DOMAINS_TYPE", default="all")
         page_limit_raw = load_env("FATHOM_MEETINGS_PAGE_LIMIT", default="")
         page_limit = int(page_limit_raw) if page_limit_raw.strip() else None
@@ -343,14 +384,18 @@ def main() -> int:
             calendar_invitees_domains_type=meetings_scope,
             limit=page_limit,
         )
-        records = build_records_from_source(items, client=client)
-
-        if not records:
+        if not items:
             print("[WARN] No transcript records were found.")
             return 0
 
-        count = export_records(records, output_dir=output_dir)
+        count = export_records_streaming(items, client=client, output_dir=output_dir)
         print(f"[INFO] Done. Exported {count} transcript files.")
+        print(
+            "[INFO] Export summary: every transcript is written one-by-one as it is fetched, "
+            "so partial exports remain available if the script stops early."
+        )
+        print(f"[INFO] Transcript markdown files: {output_dir.resolve()}")
+        print(f"[INFO] CSV index of all exported files: {(output_dir / 'index.csv').resolve()}")
         return 0
 
     except FathomExporterError as exc:
