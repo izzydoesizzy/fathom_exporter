@@ -134,3 +134,72 @@ def test_export_records_streaming_writes_files_incrementally(tmp_path: Path):
     csv_path = tmp_path / "index.csv"
     rows = list(csv.DictReader(csv_path.open("r", encoding="utf-8")))
     assert len(rows) == 2
+
+
+
+def test_iter_records_from_source_skips_failed_transcript_fetch():
+    class FlakyClient:
+        def fetch_transcript(self, recording_id: str) -> str:
+            from fathom_exporter import FathomExporterError
+
+            if recording_id == "bad":
+                raise FathomExporterError("429")
+            return "ok"
+
+    from fathom_exporter import iter_records_from_source
+
+    items = [
+        {"recording_id": "good", "meeting_title": "Good", "recording_start_time": "2024-01-01T00:00:00Z"},
+        {"recording_id": "bad", "meeting_title": "Bad", "recording_start_time": "2024-01-01T00:00:00Z"},
+    ]
+
+    records = list(iter_records_from_source(items, client=FlakyClient()))
+    assert len(records) == 1
+    assert records[0].record_id == "good"
+
+
+def test_request_json_retries_on_429(monkeypatch):
+    import io
+    from urllib.error import HTTPError
+
+    from fathom_exporter import FathomClient
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"transcript":"done"}'
+
+    calls = {"count": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise HTTPError(
+                url=request.full_url,
+                code=429,
+                msg="Too Many Requests",
+                hdrs={"Retry-After": "0"},
+                fp=io.BytesIO(b""),
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr("fathom_exporter.urlopen", fake_urlopen)
+    monkeypatch.setattr("fathom_exporter.time.sleep", lambda *_: None)
+
+    client = FathomClient(
+        api_key="key",
+        base_url="https://api.fathom.ai",
+        min_interval_seconds=0,
+        max_retries=2,
+        retry_backoff_seconds=0.01,
+        max_backoff_seconds=0.01,
+    )
+
+    payload = client._request_json("https://api.fathom.ai/external/v1/x", "test endpoint")
+    assert payload["transcript"] == "done"
+    assert calls["count"] == 2

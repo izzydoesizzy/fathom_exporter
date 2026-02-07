@@ -42,10 +42,24 @@ class FathomExporterError(Exception):
 class FathomClient:
     """Minimal API client for transcript fetches from Fathom External API."""
 
-    def __init__(self, api_key: str, base_url: str, timeout: int = 30):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout: int = 30,
+        min_interval_seconds: float = 1.05,
+        max_retries: int = 6,
+        retry_backoff_seconds: float = 1.0,
+        max_backoff_seconds: float = 30.0,
+    ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.min_interval_seconds = max(0.0, min_interval_seconds)
+        self.max_retries = max(0, max_retries)
+        self.retry_backoff_seconds = max(0.1, retry_backoff_seconds)
+        self.max_backoff_seconds = max(1.0, max_backoff_seconds)
+        self._last_request_started_at = 0.0
 
     def fetch_transcript(self, recording_id: str) -> str:
         endpoint = f"external/v1/recordings/{recording_id}/transcript"
@@ -114,18 +128,39 @@ class FathomClient:
             "User-Agent": "fathom-exporter/1.0",
         }
         request = Request(url, headers=headers, method="GET")
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
-        except HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise FathomExporterError(
-                f"API request failed with HTTP {exc.code} for {error_context}. Response body: {details}"
-            ) from exc
-        except URLError as exc:
-            raise FathomExporterError(
-                f"Network error while calling {error_context}: {exc}"
-            ) from exc
+        for attempt in range(1, self.max_retries + 2):
+            self._wait_for_request_window()
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    body = response.read().decode("utf-8")
+                    break
+            except HTTPError as exc:
+                details = exc.read().decode("utf-8", errors="replace")
+                status = exc.code
+                if status in {429, 500, 502, 503, 504} and attempt <= self.max_retries:
+                    retry_after = self._retry_after_seconds(exc)
+                    delay = max(retry_after, self._backoff_seconds(attempt))
+                    print(
+                        f"[WARN] HTTP {status} from {error_context}. "
+                        f"Retrying in {delay:.2f}s (attempt {attempt}/{self.max_retries})."
+                    )
+                    time.sleep(delay)
+                    continue
+                raise FathomExporterError(
+                    f"API request failed with HTTP {status} for {error_context}. Response body: {details}"
+                ) from exc
+            except URLError as exc:
+                if attempt <= self.max_retries:
+                    delay = self._backoff_seconds(attempt)
+                    print(
+                        f"[WARN] Network error for {error_context}: {exc}. "
+                        f"Retrying in {delay:.2f}s (attempt {attempt}/{self.max_retries})."
+                    )
+                    time.sleep(delay)
+                    continue
+                raise FathomExporterError(
+                    f"Network error while calling {error_context}: {exc}"
+                ) from exc
 
         try:
             return json.loads(body)
@@ -133,6 +168,26 @@ class FathomClient:
             raise FathomExporterError(
                 f"API returned invalid JSON for {error_context}."
             ) from exc
+
+    def _wait_for_request_window(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_request_started_at
+        if elapsed < self.min_interval_seconds:
+            time.sleep(self.min_interval_seconds - elapsed)
+        self._last_request_started_at = time.monotonic()
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        exponential = self.retry_backoff_seconds * (2 ** (attempt - 1))
+        return min(self.max_backoff_seconds, exponential)
+
+    def _retry_after_seconds(self, http_error: HTTPError) -> float:
+        retry_after = http_error.headers.get("Retry-After")
+        if not retry_after:
+            return 0.0
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            return 0.0
 
 
 
@@ -239,7 +294,11 @@ def iter_records_from_source(
         )
         participants = extract_participants(item)
 
-        transcript = client.fetch_transcript(str(recording_id))
+        try:
+            transcript = client.fetch_transcript(str(recording_id))
+        except FathomExporterError as exc:
+            print(f"[WARN] Skipping recording_id={recording_id} after retries: {exc}")
+            continue
 
         yield TranscriptRecord(
             record_id=str(recording_id),
@@ -372,14 +431,25 @@ def main() -> int:
         meetings_scope = load_env("FATHOM_MEETINGS_DOMAINS_TYPE", default="all")
         page_limit_raw = load_env("FATHOM_MEETINGS_PAGE_LIMIT", default="")
         page_limit = int(page_limit_raw) if page_limit_raw.strip() else None
+        min_interval_raw = load_env("FATHOM_MIN_INTERVAL_SECONDS", default="1.05")
+        min_interval_seconds = float(min_interval_raw)
+        max_retries_raw = load_env("FATHOM_MAX_RETRIES", default="6")
+        max_retries = int(max_retries_raw)
 
         print(f"[INFO] Base URL: {base_url}")
         print(f"[INFO] Output directory: {output_dir.resolve()}")
         print(f"[INFO] Meetings filter (calendar_invitees_domains_type): {meetings_scope}")
         if page_limit:
             print(f"[INFO] Meetings page limit override: {page_limit}")
+        print(f"[INFO] Minimum request interval: {min_interval_seconds:.2f}s")
+        print(f"[INFO] Max retries per request: {max_retries}")
 
-        client = FathomClient(api_key=api_key, base_url=base_url)
+        client = FathomClient(
+            api_key=api_key,
+            base_url=base_url,
+            min_interval_seconds=min_interval_seconds,
+            max_retries=max_retries,
+        )
         items = client.fetch_all_meetings(
             calendar_invitees_domains_type=meetings_scope,
             limit=page_limit,

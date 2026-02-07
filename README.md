@@ -56,6 +56,8 @@ export FATHOM_API_BASE_URL="https://api.fathom.ai"
 export FATHOM_OUTPUT_DIR="TRANSCRIPTS"
 export FATHOM_MEETINGS_DOMAINS_TYPE="all"
 export FATHOM_MEETINGS_PAGE_LIMIT=""  # optional override for debugging
+export FATHOM_MIN_INTERVAL_SECONDS="1.05"  # keeps calls under 60 requests / 60 seconds
+export FATHOM_MAX_RETRIES="6"
 ```
 
 ### 3) Run the exporter
@@ -88,6 +90,13 @@ Inside that folder you will find:
 The exporter writes files **one-by-one while the script is running** (not only at the very end).
 That means if the script fails halfway through, all transcripts that were already exported remain
 saved in `TRANSCRIPTS` and listed in `index.csv`.
+
+The API client also includes a built-in request throttle and retries for 429/5xx responses:
+
+- waits between requests (`FATHOM_MIN_INTERVAL_SECONDS`)
+- retries transient failures (`FATHOM_MAX_RETRIES`) with exponential backoff
+- respects `Retry-After` response headers when provided
+- skips a single transcript after retries so the overall export continues
 
 ---
 
