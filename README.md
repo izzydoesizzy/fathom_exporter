@@ -112,7 +112,7 @@ export FATHOM_API_KEY="sk_live_xxxxxxxxxxxxxxxxx"
 
 Important: include the quotes if your key has special characters.
 
-Optional settings:
+Optional settings (for advanced users):
 
 ```bash
 export FATHOM_API_BASE_URL="https://api.fathom.ai"
