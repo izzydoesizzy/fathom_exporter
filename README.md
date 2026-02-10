@@ -19,7 +19,7 @@ This project is designed for people with very little coding experience.
 
 You only need:
 
-1. A Mac terminal
+1. A Mac terminal (or Windows PowerShell)
 2. Python 3 installed (most Macs already have it)
 3. A Fathom API key
 
@@ -33,6 +33,50 @@ python3 --version
 
 ## Step-by-step setup
 
+### Terminal basics (for total beginners)
+
+If you've never used Terminal before, start here.
+
+### Open Terminal
+
+- **Mac:** Press `Command (⌘) + Space`, type `Terminal`, press `Enter`.
+- **Windows:** Press `Windows key`, type `PowerShell`, press `Enter`.
+
+### What `cd` means
+
+`cd` means **change directory** (move into a folder).
+
+Examples:
+
+```bash
+cd Desktop
+```
+
+Moves into your Desktop folder.
+
+```bash
+cd /Users/yourname/Downloads
+```
+
+Moves to an exact folder path.
+
+Useful navigation shortcuts:
+
+- `pwd` = show where you are right now
+- `ls` = list files/folders in your current folder
+- `cd ..` = go up one folder
+- `cd ~` = go to your home folder
+- Press `Tab` while typing a folder name to auto-complete it
+
+If you cloned this project and do not know where it is, you can search from your home folder:
+
+```bash
+cd ~
+find . -type d -name "fathom_exporter"
+```
+
+Then use the returned path with `cd`.
+
 ### 1) Download this project
 
 If you already cloned the repo, open Terminal and go to this folder.
@@ -41,13 +85,32 @@ If you already cloned the repo, open Terminal and go to this folder.
 cd /path/to/fathom_exporter
 ```
 
-### 2) Add your Fathom API key
+Tip: after typing `cd ` (with a space), you can drag the `fathom_exporter` folder from Finder into Terminal and it will paste the full path automatically.
+
+### 2) Generate your Fathom API key
+
+1. Open this page in your browser: <https://fathom.video/customize>
+2. Sign in to your Fathom account if asked.
+3. In the left/navigation settings area, open **API Access**.
+4. Click the button to create/generate a new API key.
+5. Copy the key immediately (many services only show the full key once).
+6. Keep it private (treat it like a password).
+
+### 3) Add your Fathom API key
 
 In the same terminal session:
 
 ```bash
 export FATHOM_API_KEY="paste_your_real_key_here"
 ```
+
+Example (fake key format):
+
+```bash
+export FATHOM_API_KEY="sk_live_xxxxxxxxxxxxxxxxx"
+```
+
+Important: include the quotes if your key has special characters.
 
 Optional settings:
 
@@ -60,7 +123,9 @@ export FATHOM_MIN_INTERVAL_SECONDS="1.05"  # keeps calls under 60 requests / 60 
 export FATHOM_MAX_RETRIES="6"
 ```
 
-### 3) Run the exporter
+If you close Terminal, you must run `export FATHOM_API_KEY="..."` again next time.
+
+### 4) Run the exporter
 
 ```bash
 python3 fathom_exporter.py
@@ -101,6 +166,25 @@ The API client also includes a built-in request throttle and retries for 429/5xx
 ---
 
 ## Troubleshooting
+
+### "command not found: python3"
+
+Python is not installed (or not on your PATH). Install Python 3, then reopen Terminal and run:
+
+```bash
+python3 --version
+```
+
+### "No such file or directory" after `cd ...`
+
+Your folder path is wrong. Use:
+
+```bash
+pwd
+ls
+```
+
+to confirm where you are, then try `cd` again using Tab auto-complete.
 
 ### “Missing required environment variable: FATHOM_API_KEY”
 
