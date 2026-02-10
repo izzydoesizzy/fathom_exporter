@@ -1,4 +1,4 @@
-# Fathom Transcript Exporter (Beginner-Friendly)
+# Fathom Bulk Transcript Exporter (Beginner-Friendly)
 
 Export all of your Fathom transcripts into local files that you can keep, search, and back up.
 
